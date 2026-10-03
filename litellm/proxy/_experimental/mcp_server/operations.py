@@ -2869,7 +2869,7 @@ async def _execute_list_prompts(
     context: OperationContext, params: PaginatedRequestParams, host_progress_callback: ProgressCallback | None = None
 ) -> ListPromptsResult:
     from mcp.shared.exceptions import MCPError
-    from mcp.types import INVALID_PARAMS
+    from mcp.types import INVALID_PARAMS, INVALID_REQUEST
 
     from litellm.proxy._experimental.mcp_server.catalog import list_gateway_catalog
     from litellm.proxy._experimental.mcp_server.server_resolution import MCPServerTargetCatalog
@@ -2883,6 +2883,8 @@ async def _execute_list_prompts(
         return result
     except MCPError:
         raise
+    except HTTPException as error:
+        raise MCPError(code=INVALID_REQUEST, message=_http_detail_message(error.detail)) from error
     except Exception as error:
         if params.cursor is not None:
             raise MCPError(
@@ -2924,7 +2926,7 @@ async def _execute_list_resources(
     context: OperationContext, params: PaginatedRequestParams, host_progress_callback: ProgressCallback | None = None
 ) -> ListResourcesResult:
     from mcp.shared.exceptions import MCPError
-    from mcp.types import INVALID_PARAMS
+    from mcp.types import INVALID_PARAMS, INVALID_REQUEST
 
     from litellm.proxy._experimental.mcp_server.catalog import list_gateway_catalog
     from litellm.proxy._experimental.mcp_server.server_resolution import MCPServerTargetCatalog
@@ -2938,6 +2940,8 @@ async def _execute_list_resources(
         return result
     except MCPError:
         raise
+    except HTTPException as error:
+        raise MCPError(code=INVALID_REQUEST, message=_http_detail_message(error.detail)) from error
     except Exception as error:
         if params.cursor is not None:
             raise MCPError(
@@ -2950,7 +2954,7 @@ async def _execute_list_resource_templates(
     context: OperationContext, params: PaginatedRequestParams, host_progress_callback: ProgressCallback | None = None
 ) -> ListResourceTemplatesResult:
     from mcp.shared.exceptions import MCPError
-    from mcp.types import INVALID_PARAMS
+    from mcp.types import INVALID_PARAMS, INVALID_REQUEST
 
     from litellm.proxy._experimental.mcp_server.catalog import list_gateway_catalog
     from litellm.proxy._experimental.mcp_server.server_resolution import MCPServerTargetCatalog
@@ -2964,6 +2968,8 @@ async def _execute_list_resource_templates(
         return result
     except MCPError:
         raise
+    except HTTPException as error:
+        raise MCPError(code=INVALID_REQUEST, message=_http_detail_message(error.detail)) from error
     except Exception as error:
         if params.cursor is not None:
             raise MCPError(
