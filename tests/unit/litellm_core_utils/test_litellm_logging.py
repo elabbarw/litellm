@@ -21,8 +21,7 @@ from openai._legacy_response import HttpxBinaryResponseContent
 import litellm
 from litellm._internal_context import in_post_response_phase
 from litellm._logging import session_id_var, trace_id_var
-from litellm.constants import REDACTED_BY_LITELLM, SENTRY_PII_DENYLIST
-from litellm.constants import KUBERNETES_POD_ROUTING_KEY
+from litellm.constants import KUBERNETES_POD_ROUTING_KEY, REDACTED_BY_LITELLM, SENTRY_PII_DENYLIST
 from litellm.cost_calculator import ocr_batch_cost
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.litellm_logging import Logging as LitellmLogging

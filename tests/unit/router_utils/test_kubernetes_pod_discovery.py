@@ -840,11 +840,15 @@ async def test_router_session_requests_stick_to_one_pod_for_sync_and_async(
         )
         async_router: Final = Router(
             model_list=[_deployment()],
-            kubernetes_pod_discovery=KubernetesPodDiscovery(clock=lambda: 0.0, proxy_environment=_empty_proxy_environment),
+            kubernetes_pod_discovery=KubernetesPodDiscovery(
+                clock=lambda: 0.0, proxy_environment=_empty_proxy_environment
+            ),
         )
         sync_router: Final = Router(
             model_list=[_deployment()],
-            kubernetes_pod_discovery=KubernetesPodDiscovery(clock=lambda: 0.0, proxy_environment=_empty_proxy_environment),
+            kubernetes_pod_discovery=KubernetesPodDiscovery(
+                clock=lambda: 0.0, proxy_environment=_empty_proxy_environment
+            ),
         )
         async_client: Final = _cache_async_client(async_router)
         sync_client: Final = _cache_sync_client(sync_router)
