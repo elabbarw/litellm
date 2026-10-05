@@ -5,7 +5,7 @@ description: Define or refactor Rust string-valued enums and their Serde adapter
 
 # Rust string enums
 
-Use this skill when adding or changing enums represented by a single string, or surveying handwritten string conversions. The [survey](references/survey.md) records the migration candidates found on 2026-10-05. Recheck the current source before using that inventory
+Use this skill when adding or changing enums represented by a single string, or surveying handwritten string conversions
 
 ## Choose the representation
 
@@ -26,7 +26,7 @@ Strum implements string conversion traits, not Serde traits. `EnumString` implem
     serde_with::SerializeDisplay,
 )]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "schema", schemars(with = "String"))]
+#[cfg_attr(feature = "schema", schemars(from = "String", into = "String"))]
 pub enum EventType {
     #[strum(serialize = "event.created")]
     Created,
@@ -49,7 +49,7 @@ Use the workspace dependencies and enable `serde_with.workspace = true` in a cra
 
 Remove replaced manual Serde implementations and obsolete Serde conversion attributes. Do not combine the new derives with `wire_type`, `request_type`, or `response_type` aliases that already derive the same Serde traits. Expand the necessary non-Serde derives and schema attributes locally rather than changing shared aliases for unrelated types
 
-Preserve the generated schema. Open string enums need a string schema, including unknown values. When replacing Serde `from`/`into` attributes that previously supplied that schema, retain it with `#[cfg_attr(feature = "schema", schemars(with = "String"))]` and compare the generated result
+Preserve the generated schema, including titles and definition names. Open string enums need a string schema, including unknown values. When replacing Serde `from`/`into` attributes that previously supplied that schema, retain their schema behavior with `#[cfg_attr(feature = "schema", schemars(from = "String", into = "String"))]` and compare the full generated result. `schemars(with = "String")` also makes a string schema, but changes the schema name and title, so keep it only where it already matches the contract
 
 Keep custom `FromStr` and `Display` implementations for structured strings or validation that Strum does not express faithfully. Their Serde adapters can still use `DeserializeFromStr` and `SerializeDisplay`. Do not replace JSON visitors, tagged payload enums, permissive value wrappers, or domain transformations with string parsing
 

@@ -47,8 +47,8 @@ async fn calls_defer_execution_until_polled(
         panic!("expected a completed message");
     };
     assert_eq!(
-        response.content,
-        message_body()["content"].as_array().unwrap().as_slice()
+        serde_json::to_value(response.content).unwrap(),
+        message_body()["content"]
     );
     assert!(secrets.requested().contains(&"ANTHROPIC_API_KEY".into()));
     let sent = only_request(&upstream).await;
@@ -108,8 +108,14 @@ async fn the_provider_message_is_returned(call: MessagesCall, #[case] provider: 
     .await;
 
     assert_eq!(message.id, "msg_1");
-    assert_eq!(message.content, [json!({"type": "text", "text": "hi"})]);
-    assert_eq!(message.stop_reason.as_deref(), Some("end_turn"));
+    assert_eq!(
+        serde_json::to_value(&message.content).unwrap(),
+        json!([{"type": "text", "text": "hi"}])
+    );
+    assert_eq!(
+        message.stop_reason.as_ref().map(|reason| reason.as_str()),
+        Some("end_turn")
+    );
 }
 
 /// A refusal and fields the route does not model come back exactly as the provider sent
@@ -143,7 +149,10 @@ async fn the_message_passes_through_losslessly(call: MessagesCall) {
     })
     .await;
 
-    assert_eq!(message.stop_reason.as_deref(), Some("refusal"));
+    assert_eq!(
+        message.stop_reason.as_ref().map(|reason| reason.as_str()),
+        Some("refusal")
+    );
     assert_eq!(serde_json::to_value(&message).unwrap(), upstream_body);
 }
 
@@ -379,8 +388,8 @@ async fn route_uses_injected_dependencies_and_optional_cache(
             panic!("expected a completed message");
         };
         assert_eq!(
-            response.content,
-            message_body()["content"].as_array().unwrap().as_slice()
+            serde_json::to_value(response.content).unwrap(),
+            message_body()["content"]
         );
     }
     let requests = received(&upstream).await;

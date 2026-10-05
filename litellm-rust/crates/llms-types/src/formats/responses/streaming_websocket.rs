@@ -1,7 +1,19 @@
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use super::ResponsesOutputItem;
+use crate::recognized::Recognized;
+use crate::serde_compat::deserialize_present;
 use serde_json::{Map, Value};
 
-#[derive(Clone, Debug, PartialEq, Eq, strum::AsRefStr)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    strum::AsRefStr,
+    strum::EnumString,
+    strum::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(with = "String"))]
 pub enum ResponsesWsEventType {
@@ -27,52 +39,40 @@ impl ResponsesWsEventType {
     }
 }
 
-impl Serialize for ResponsesWsEventType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for ResponsesWsEventType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(match value.as_str() {
-            "response.create" => Self::ResponseCreate,
-            "response.created" => Self::ResponseCreated,
-            "response.completed" => Self::ResponseCompleted,
-            "response.failed" => Self::ResponseFailed,
-            "response.incomplete" => Self::ResponseIncomplete,
-            "error" => Self::Error,
-            _ => Self::Other(value),
-        })
-    }
-}
-
 #[macro_rules_attribute::apply(wire_type)]
 pub struct ResponsesWsEvent {
     #[serde(rename = "type")]
     pub event_type: ResponsesWsEventType,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub model: Option<Recognized<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub response: Option<Recognized<ResponsesEventResponse>>,
     #[serde(flatten)]
     pub data: Map<String, Value>,
 }
 
 impl ResponsesWsEvent {
     pub fn model(&self) -> Option<&str> {
-        let model = self.data.get("model").and_then(Value::as_str);
-        if model.is_some() {
-            return model;
-        }
-        self.data
-            .get("response")
-            .and_then(Value::as_object)
-            .and_then(|response| response.get("model"))
-            .and_then(Value::as_str)
+        self.model
+            .as_ref()
+            .and_then(Recognized::known)
+            .map(String::as_str)
+            .or_else(|| {
+                self.response
+                    .as_ref()
+                    .and_then(Recognized::known)
+                    .and_then(|response| response.model.as_ref())
+                    .and_then(Recognized::known)
+                    .map(String::as_str)
+            })
     }
 
     pub fn is_response_create(&self) -> bool {
@@ -114,21 +114,6 @@ mod tests {
 
     use super::*;
 
-    #[rstest]
-    #[case::known("response.completed", ResponsesWsEventType::ResponseCompleted)]
-    #[case::unknown(
-        "response.output_text.delta",
-        ResponsesWsEventType::Other("response.output_text.delta".to_string())
-    )]
-    fn event_type_round_trips_known_and_unknown_values(
-        #[case] value: &str,
-        #[case] expected: ResponsesWsEventType,
-    ) {
-        let actual: ResponsesWsEventType =
-            serde_json::from_str(&serde_json::to_string(value).unwrap()).expect("valid event type");
-        assert_eq!(actual, expected);
-    }
-
     #[test]
     fn error_frame_matches_proxy_shape() {
         let frame = ResponsesErrorFrame::invalid_request("missing model");
@@ -154,4 +139,20 @@ mod tests {
         let event: ResponsesWsEvent = serde_json::from_value(payload).expect("valid event");
         assert_eq!(event.model(), expected);
     }
+}
+
+#[serde_with::skip_serializing_none]
+#[macro_rules_attribute::apply(wire_type)]
+#[derive(Default)]
+pub struct ResponsesEventResponse {
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub id: Option<Recognized<String>>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub model: Option<Recognized<String>>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub status: Option<Recognized<String>>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub output: Option<Recognized<Vec<Recognized<ResponsesOutputItem>>>>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }

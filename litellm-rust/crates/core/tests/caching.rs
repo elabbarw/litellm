@@ -431,7 +431,7 @@ async fn responses_refetches_instead_of_deserializing_another_api_response(
                     id: "fresh-response".into(),
                     model: "test".into(),
                     output: vec![
-                        json!({"type":"message","content":[{"type":"output_text","text":"fresh"}]}),
+                        serde_json::from_value(json!({"type":"message","content":[{"type":"output_text","text":"fresh"}]})).unwrap(),
                     ],
                     extra: [("status".into(), json!("completed"))]
                         .into_iter()
@@ -442,7 +442,10 @@ async fn responses_refetches_instead_of_deserializing_another_api_response(
         .await
         .unwrap();
         assert_eq!(response.id, "fresh-response");
-        assert_eq!(response.output[0]["content"][0]["text"], "fresh");
+        assert_eq!(
+            serde_json::to_value(&response.output[0]).unwrap()["content"][0]["text"],
+            "fresh"
+        );
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
@@ -498,8 +501,13 @@ async fn messages_cache_identity_includes_provider_native_parameters(
             .unwrap();
         assert_eq!(response.id, expected_call.to_string());
         assert_eq!(
-            response.content[0]["text"],
-            format!("answer {expected_call}")
+            response.content[0]
+                .known()
+                .unwrap()
+                .text
+                .as_ref()
+                .and_then(litellm_llms_types::serde_compat::Nullable::as_deref),
+            Some(format!("answer {expected_call}").as_str())
         );
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
