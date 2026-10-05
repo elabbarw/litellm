@@ -1145,7 +1145,7 @@ def update_db_model(
 )
 async def get_kubernetes_pods(
     model_id: str,
-    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    user_api_key_dict: Annotated[UserAPIKeyAuth, Depends(user_api_key_auth)],
 ) -> KubernetesPodsResponse:
     if user_api_key_dict.user_role not in (
         LitellmUserRoles.PROXY_ADMIN,

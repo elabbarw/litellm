@@ -16,20 +16,16 @@ interface KubernetesPodsCardContentProps {
   apiErrorMessage: string;
 }
 
-function KubernetesPodsCardContent({
-  data,
-  isError,
-  isPending,
-  apiErrorMessage,
-}: KubernetesPodsCardContentProps) {
+function KubernetesPodsCardContent({ data, isError, isPending, apiErrorMessage }: KubernetesPodsCardContentProps) {
   const hasData = data !== undefined && !isError;
   const hasLookupError = hasData && data.error !== null;
   const showEmptyState = hasData && data.error === null && data.pod_ips.length === 0;
   const showPodIps = hasData && data.error === null && data.pod_ips.length > 0;
+  const podCount = hasData && !hasLookupError ? data.pod_count : null;
 
   return (
     <>
-      {data && hasData && <p className="mt-4 text-sm">{data.pod_count} ready pods</p>}
+      {podCount !== null && <p className="mt-4 text-sm">{podCount} ready pods</p>}
       {isPending && (
         <p className="mt-4 text-sm text-muted-foreground" role="status">
           Loading Kubernetes pods
@@ -45,9 +41,7 @@ function KubernetesPodsCardContent({
           {data.error}
         </p>
       )}
-      {data && showEmptyState && (
-        <p className="mt-4 text-sm text-muted-foreground">No ready pods</p>
-      )}
+      {data && showEmptyState && <p className="mt-4 text-sm text-muted-foreground">No ready pods</p>}
       {data && showPodIps && (
         <ul aria-label="Ready Kubernetes pod IPs" className="mt-3 space-y-1 font-mono text-sm">
           {data.pod_ips.map((ip) => (
@@ -67,7 +61,7 @@ export default function KubernetesPodsCard({ modelId }: KubernetesPodsCardProps)
     { refetchInterval: 10_000 },
   );
   const apiErrorMessage =
-    error instanceof Error ? error.message : (JSON.stringify(error) ?? "Failed to load Kubernetes pods");
+    error instanceof Error ? error.message : JSON.stringify(error) ?? "Failed to load Kubernetes pods";
 
   return (
     <Card className="block p-6">

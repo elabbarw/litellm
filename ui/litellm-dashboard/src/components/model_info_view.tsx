@@ -23,7 +23,7 @@ import {
   isComplexityRouter as isComplexityRouterParams,
 } from "./add_model/auto_router_strategies";
 import { canEditAutoRouter, canModifyModel } from "@/utils/modelPermissions";
-import { teamsUserCanAssign } from "@/utils/roles";
+import { isProxyAdminTierRole, teamsUserCanAssign } from "@/utils/roles";
 import { useTeams } from "@/app/(dashboard)/hooks/teams/useTeams";
 import DeleteResourceModal from "./common_components/DeleteResourceModal";
 import EditAutoRouterModal from "./edit_auto_router/edit_auto_router_modal";
@@ -706,7 +706,7 @@ export default function ModelInfoView({
               </div>
             </div>
 
-            {modelData?.litellm_params?.kubernetes_pod_discovery === true && (
+            {modelData?.litellm_params?.kubernetes_pod_discovery === true && isProxyAdminTierRole(userRole ?? "") && (
               <div className="mb-6">
                 <KubernetesPodsCard modelId={modelId} />
               </div>

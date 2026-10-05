@@ -3627,6 +3627,32 @@ def test_internal_user_cannot_access_kubernetes_pod_discovery_route() -> None:
         )
 
 
+def test_proxy_admin_viewer_can_access_kubernetes_pod_discovery_route() -> None:
+    route: Final = "/model/model-pods-1/kubernetes_pods"
+    user_obj: Final = LiteLLM_UserTable(
+        user_id="admin_viewer",
+        user_email="viewer@example.com",
+        user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+    )
+    valid_token: Final = UserAPIKeyAuth(
+        user_id="admin_viewer",
+        user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+    )
+    request: Final = MagicMock(spec=Request)
+    request.method = "GET"
+    request.query_params = {}
+
+    assert RouteChecks.is_management_route(route=route)
+    RouteChecks.non_proxy_admin_allowed_routes_check(
+        user_obj=user_obj,
+        _user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+        route=route,
+        request=request,
+        valid_token=valid_token,
+        request_data={},
+    )
+
+
 @pytest.mark.parametrize(
     "route",
     [

@@ -63,6 +63,7 @@ describe("KubernetesPodsCard", () => {
     renderWithProviders(<KubernetesPodsCard modelId="model-pods-1" />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("temporary DNS failure");
+    expect(screen.queryByText("0 ready pods")).not.toBeInTheDocument();
   });
 
   it("shows an API error", async () => {
