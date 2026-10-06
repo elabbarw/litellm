@@ -53,6 +53,7 @@ impl ChatCompletionsRoute {
     ) -> Result<ChatCompletionsResponse, Error> {
         let crate::CallOptions {
             cache: cache_options,
+            model_group,
             observers,
         } = options.into();
         litellm_host::lifecycle::observe_unary(
@@ -60,6 +61,7 @@ impl ChatCompletionsRoute {
             self.run_call(
                 request.into(),
                 cache_options,
+                model_group.as_deref(),
                 interceptors,
                 observers.as_ref(),
             ),
@@ -71,15 +73,15 @@ impl ChatCompletionsRoute {
         &self,
         request: ChatCompletionsRequest<'_>,
         cache_options: Option<litellm_cache_response::CachePolicy>,
+        model_group: Option<&str>,
         interceptors: &impl litellm_host::interceptors::Interceptors<Error>,
         observers: Option<&ObservationSender>,
     ) -> Result<ChatCompletionsResponse, Error> {
         let cache_input = self
             .cache
             .as_ref()
-            .map(|_| request.cache_key_input())
-            .transpose()?
-            .unwrap_or_default();
+            .map(|_| request.cache_key_input(model_group))
+            .transpose()?;
         let resolved = resolve_request(request)?;
         let snapshot = self
             .secrets

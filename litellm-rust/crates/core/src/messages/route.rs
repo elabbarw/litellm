@@ -36,7 +36,8 @@ impl super::MessagesRoute {
         options: impl Into<crate::CallOptions>,
     ) -> MessagesMachine {
         let crate::CallOptions {
-            cache: cache_options,
+            cache,
+            model_group,
             observers,
         } = options.into();
         hosted_call(
@@ -46,7 +47,8 @@ impl super::MessagesRoute {
                 let context = crate::context::CallContext::new(
                     &interceptors,
                     crate::CallOptions {
-                        cache: cache_options,
+                        cache,
+                        model_group,
                         observers,
                     },
                 );

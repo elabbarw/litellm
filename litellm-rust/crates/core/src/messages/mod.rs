@@ -74,9 +74,8 @@ impl MessagesRoute {
             let cache_input = self
                 .cache
                 .as_ref()
-                .map(|_| call.cache_key_input())
-                .transpose()?
-                .unwrap_or_default();
+                .map(|_| call.cache_key_input(context.model_group.as_deref()))
+                .transpose()?;
             let prepared = prepare::prepare(call, self.secrets.as_ref()).await?;
             crate::diagnostic::provider(&prepared.body.model, prepared.provider.as_str());
             let request = self.prepare_outbound(prepared, &context).boxed().await?;
