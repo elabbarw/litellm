@@ -36,11 +36,13 @@ Not here: serving HTTP (axum routes, extractors), config file reading, rollout s
 
 ## Response caching and accounting boundary
 
-Attach a `litellm_cache_response::ScopedCache` with `route.with_cache(cache)`. Cached and uncached routes use the same `execute` and `machine` methods. `CallOptions` carries a scope-free `CachePolicy` and observation; per-call policy never replaces the attached scope or service
+Attach a long-lived `ResponseCacheService` with `route.with_cache(service)`. Cached and uncached routes use the same `execute` and `machine` methods. `CallOptions` carries the per-call `CacheOptions` (policy and caller scope) and observation; they never replace the attached service
+
+Every route runs one cache lifecycle: `CachePlan::for_request` builds the key input from the request as the caller sent it, `guard` and `confirm` drop the plan when `before_provider_request` rewrote the request, and `CacheSession::open` asks the service for the key once and holds it for lookup and store
 
 Messages groups per-call dependencies in `CallContext` and explicitly sequences cache lookup, provider execution, result acceptance, and cache storage. Provider transport does not own cache orchestration. Stream capture remains in the shared cache implementation
 
-Core owns request identity, typed response reconstruction and stream capture/replay. `cache-response` owns cache policy, namespacing, scope encoding, versioned envelopes and freshness. The SDK explicitly chooses shared scope. The gateway derives isolated scope from authenticated identity before attaching its service
+Core owns request identity, typed response reconstruction and stream capture/replay. `cache-response` owns cache policy, namespacing, scope encoding, versioned envelopes and freshness. The SDK explicitly chooses shared scope. The gateway derives a caller scope from authenticated identity per request
 
 Core delivers `ExecutionFacts` through the awaited `ResultReady` host operation for both provider and cached results, before public response processing or stream opening. Facts carry resolved model/provider and result source, including the hit key. Usage remains in the typed response or delivered stream, where completion and cancellation determine what was actually reported. Passive observation is not an accounting delivery mechanism
 

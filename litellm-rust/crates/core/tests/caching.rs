@@ -17,7 +17,7 @@ use litellm_cache_response::{
 };
 use litellm_core::{
     RouteError,
-    caching::{Cachable, CacheRequest, StreamCachable, execute_streaming, execute_unary},
+    caching::{Cachable, CachePlan, StreamCachable},
     messages::route::Messages,
     responses::route::Responses,
 };
@@ -63,17 +63,90 @@ impl StreamCachable for TestRoute {
     }
 }
 
+struct CacheRequest {
+    identity: ProviderIdentity,
+    target: CacheTarget,
+    parameters: Value,
+}
+
 fn cache_request(input: Value) -> CacheRequest {
     CacheRequest {
         identity: ProviderIdentity {
             model: "test-model".into(),
             provider: "test-provider".into(),
         },
-        input: Some(CacheKeyInput::request(
-            CacheTarget::resolve(None, "test-model", None, None),
-            input,
-        )),
+        target: CacheTarget::resolve(None, "test-model", None, None),
+        parameters: input,
     }
+}
+
+fn shared() -> CacheOptions {
+    CacheOptions::shared(CachePolicy::default())
+}
+
+fn plan<P: Cachable>(
+    request: CacheRequest,
+    cache: Option<Arc<dyn ResponseCacheService>>,
+    options: Option<CacheOptions>,
+) -> (ProviderIdentity, Option<CachePlan>) {
+    let plan = cache.zip(options).and_then(|(cache, options)| {
+        CachePlan::new(
+            cache,
+            options,
+            CacheKeyInput::new(P::SURFACE, request.target, request.parameters),
+        )
+    });
+    (request.identity, plan)
+}
+
+async fn execute_streaming<P, F, Fut>(
+    request: CacheRequest,
+    cache: Option<Arc<dyn ResponseCacheService>>,
+    options: Option<CacheOptions>,
+    interceptors: &impl Interceptors<RouteError>,
+    observers: Option<&litellm_host::observation::ObservationSender>,
+    provider: F,
+) -> Result<OutputOf<P>, RouteError>
+where
+    P: StreamCachable,
+    P::Response: serde::Serialize + serde::de::DeserializeOwned,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<OutputOf<P>, RouteError>>,
+{
+    let (identity, plan) = plan::<P>(request, cache, options);
+    litellm_core::caching::execute_streaming::<P, _, _>(
+        identity,
+        plan,
+        interceptors,
+        observers,
+        provider,
+    )
+    .await
+}
+
+async fn execute_unary<P, F, Fut>(
+    request: CacheRequest,
+    cache: Option<Arc<dyn ResponseCacheService>>,
+    options: Option<CacheOptions>,
+    interceptors: &impl Interceptors<RouteError>,
+    observers: Option<&litellm_host::observation::ObservationSender>,
+    provider: F,
+) -> Result<P::Response, RouteError>
+where
+    P: Cachable,
+    P::Response: serde::Serialize + serde::de::DeserializeOwned,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<P::Response, RouteError>>,
+{
+    let (identity, plan) = plan::<P>(request, cache, options);
+    litellm_core::caching::execute_unary::<P, _, _>(
+        identity,
+        plan,
+        interceptors,
+        observers,
+        provider,
+    )
+    .await
 }
 
 #[fixture]
@@ -122,10 +195,10 @@ async fn call(
 }
 
 #[rstest]
-#[case::normal(CacheOptions::new(CacheScope::Shared), true, true)]
-#[case::no_cache(CacheOptions { policy: CachePolicy { no_cache: true, ..CachePolicy::default() }, ..CacheOptions::new(CacheScope::Shared) }, false, true)]
-#[case::no_store(CacheOptions { policy: CachePolicy { no_store: true, ..CachePolicy::default() }, ..CacheOptions::new(CacheScope::Shared) }, true, false)]
-#[case::disabled(CacheOptions { policy: CachePolicy { caching: Some(false), ..CachePolicy::default() }, ..CacheOptions::new(CacheScope::Shared) }, false, false)]
+#[case::normal(shared(), true, true)]
+#[case::no_cache(CacheOptions { policy: CachePolicy { no_cache: true, ..CachePolicy::default() }, ..shared() }, false, true)]
+#[case::no_store(CacheOptions { policy: CachePolicy { no_store: true, ..CachePolicy::default() }, ..shared() }, true, false)]
+#[case::disabled(CacheOptions { policy: CachePolicy { caching: Some(false), ..CachePolicy::default() }, ..shared() }, false, false)]
 #[tokio::test]
 async fn cache_controls_apply_to_both_reads_and_writes(
     cache: Arc<dyn ResponseCacheService>,
@@ -136,13 +209,7 @@ async fn cache_controls_apply_to_both_reads_and_writes(
     let calls = AtomicUsize::new(0);
     let options = Some(options);
     let first = call(&cache, options.clone(), &calls, json!({"model":"test"})).await;
-    let second = call(
-        &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        json!({"model":"test"}),
-    )
-    .await;
+    let second = call(&cache, Some(shared()), &calls, json!({"model":"test"})).await;
     assert_eq!(first == second, writes);
     let third = call(&cache, options, &calls, json!({"model":"test"})).await;
     assert_eq!(second == third, reads);
@@ -158,14 +225,14 @@ async fn request_identity_is_canonical_and_scoped(cache: Arc<dyn ResponseCacheSe
     let calls = AtomicUsize::new(0);
     let first = call(
         &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
+        Some(shared()),
         &calls,
         json!({"model":"m", "input":{"a":1,"b":2}}),
     )
     .await;
     let second = call(
         &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
+        Some(shared()),
         &calls,
         json!({"input":{"b":2,"a":1}, "model":"m"}),
     )
@@ -174,8 +241,8 @@ async fn request_identity_is_canonical_and_scoped(cache: Arc<dyn ResponseCacheSe
     let other = call(
         &cache,
         Some(CacheOptions {
-            scope: CacheScope::Isolated("other-tenant".into()),
-            ..CacheOptions::new(CacheScope::Shared)
+            scope: CacheScope::Caller("other-tenant".into()),
+            ..shared()
         }),
         &calls,
         json!({"model":"m", "input":{"a":1,"b":2}}),
@@ -184,7 +251,7 @@ async fn request_identity_is_canonical_and_scoped(cache: Arc<dyn ResponseCacheSe
     assert_ne!(first, other);
     let changed = call(
         &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
+        Some(shared()),
         &calls,
         json!({"model":"m", "input":{"a":2,"b":2}}),
     )
@@ -201,7 +268,7 @@ async fn streamed(
     execute_streaming::<TestRoute, _, _>(
         cache_request(json!({"stream":true})),
         Some(cache.clone()),
-        Some(CacheOptions::new(CacheScope::Shared)),
+        Some(shared()),
         &(),
         None,
         || async {
@@ -449,7 +516,7 @@ async fn a_provider_failure_never_populates_the_cache(cache: Arc<dyn ResponseCac
     let first = execute_streaming::<TestRoute, _, _>(
         cache_request(json!({})),
         Some(cache.clone()),
-        Some(CacheOptions::new(CacheScope::Shared)),
+        Some(shared()),
         &(),
         None,
         || async {
@@ -459,20 +526,8 @@ async fn a_provider_failure_never_populates_the_cache(cache: Arc<dyn ResponseCac
     )
     .await;
     assert!(first.is_err());
-    let successful = call(
-        &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        json!({}),
-    )
-    .await;
-    let replayed = call(
-        &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        json!({}),
-    )
-    .await;
+    let successful = call(&cache, Some(shared()), &calls, json!({})).await;
+    let replayed = call(&cache, Some(shared()), &calls, json!({})).await;
     assert_eq!(successful, replayed);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
@@ -489,19 +544,20 @@ impl ResponseCacheService for InvalidEntryCache {
 
     fn key<'a>(
         &'a self,
-        request: &'a litellm_cache_response::ResponseCacheRequest,
+        input: &'a CacheKeyInput,
+        scope: &'a CacheScope,
     ) -> futures_util::future::BoxFuture<'a, Result<CacheKey, litellm_cache::Error>> {
-        ResponseCacheService::key(&self.0, request)
+        ResponseCacheService::key(&self.0, input, scope)
     }
 
     fn lookup<'a>(
         &'a self,
         key: &'a CacheKey,
-        request: &'a litellm_cache_response::ResponseCacheRequest,
+        max_age: Option<Duration>,
         now: Duration,
     ) -> futures_util::future::BoxFuture<'a, Result<Option<Value>, litellm_cache::Error>> {
         Box::pin(async move {
-            Ok(ResponseCacheService::lookup(&self.0, key, request, now)
+            Ok(ResponseCacheService::lookup(&self.0, key, max_age, now)
                 .await?
                 .or_else(|| Some(self.1.clone())))
         })
@@ -510,11 +566,11 @@ impl ResponseCacheService for InvalidEntryCache {
     fn store<'a>(
         &'a self,
         key: &'a CacheKey,
-        request: &'a litellm_cache_response::ResponseCacheRequest,
+        ttl: Option<Duration>,
         response: Value,
         now: Duration,
     ) -> futures_util::future::BoxFuture<'a, Result<(), litellm_cache::Error>> {
-        ResponseCacheService::store(&self.0, key, request, response, now)
+        ResponseCacheService::store(&self.0, key, ttl, response, now)
     }
 }
 
@@ -531,7 +587,8 @@ impl ResponseCacheService for ResolveFailureCache {
 
     fn key<'a>(
         &'a self,
-        _: &'a litellm_cache_response::ResponseCacheRequest,
+        _: &'a CacheKeyInput,
+        _: &'a CacheScope,
     ) -> futures_util::future::BoxFuture<'a, Result<CacheKey, litellm_cache::Error>> {
         Box::pin(async { Err(litellm_cache::Error::Unavailable) })
     }
@@ -539,7 +596,7 @@ impl ResponseCacheService for ResolveFailureCache {
     fn lookup<'a>(
         &'a self,
         _: &'a CacheKey,
-        _: &'a litellm_cache_response::ResponseCacheRequest,
+        _: Option<Duration>,
         _: Duration,
     ) -> futures_util::future::BoxFuture<'a, Result<Option<Value>, litellm_cache::Error>> {
         self.lookups.fetch_add(1, Ordering::SeqCst);
@@ -549,7 +606,7 @@ impl ResponseCacheService for ResolveFailureCache {
     fn store<'a>(
         &'a self,
         _: &'a CacheKey,
-        _: &'a litellm_cache_response::ResponseCacheRequest,
+        _: Option<Duration>,
         _: Value,
         _: Duration,
     ) -> futures_util::future::BoxFuture<'a, Result<(), litellm_cache::Error>> {
@@ -572,13 +629,7 @@ async fn key_resolution_failure_skips_cache_and_runs_provider() {
     });
     let service: Arc<dyn ResponseCacheService> = cache.clone();
     let calls = AtomicUsize::new(0);
-    let response = call(
-        &service,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        json!({}),
-    )
-    .await;
+    let response = call(&service, Some(shared()), &calls, json!({})).await;
     assert_eq!(response["call"], json!(0));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(cache.lookups.load(Ordering::SeqCst), 0);
@@ -597,20 +648,8 @@ async fn an_invalid_cached_envelope_is_replaced_by_a_provider_result(#[case] poi
     ));
     let request = json!({"input":"hello"});
     let calls = AtomicUsize::new(0);
-    let first = call(
-        &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        request.clone(),
-    )
-    .await;
-    let second = call(
-        &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        request,
-    )
-    .await;
+    let first = call(&cache, Some(shared()), &calls, request.clone()).await;
+    let second = call(&cache, Some(shared()), &calls, request).await;
     assert_eq!(first, second);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
@@ -634,7 +673,7 @@ async fn responses_refetches_instead_of_deserializing_another_api_response(
         let response = execute_unary::<Responses, _, _>(
             cache_request(json!({"input":"hello"})),
             Some(cache.clone()),
-            Some(CacheOptions::new(CacheScope::Shared)),
+            Some(shared()),
             &(),
             None,
             || async {
@@ -684,16 +723,14 @@ async fn messages_cache_identity_includes_provider_native_parameters(
                         model: "test".into(),
                         provider: "anthropic".into(),
                     },
-                    input: Some(CacheKeyInput::request(
-                        CacheTarget::resolve(None, "test", None, None),
-                        json!({
-                            "messages":[{"role":"user","content":"hello"}],
-                            "max_tokens":32, (field):value
-                        }),
-                    )),
+                    target: CacheTarget::resolve(None, "test", None, None),
+                    parameters: json!({
+                        "messages":[{"role":"user","content":"hello"}],
+                        "max_tokens":32, (field):value
+                    }),
                 },
                 Some(cache.clone()),
-                Some(CacheOptions::new(CacheScope::Shared)),
+                Some(shared()),
                 &(),
                 None,
                 || async {
@@ -757,20 +794,8 @@ async fn backend_failures_do_not_fail_inference() {
         }),
     );
     let calls = AtomicUsize::new(0);
-    let first = call(
-        &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        json!({}),
-    )
-    .await;
-    let second = call(
-        &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        json!({}),
-    )
-    .await;
+    let first = call(&cache, Some(shared()), &calls, json!({})).await;
+    let second = call(&cache, Some(shared()), &calls, json!({})).await;
     assert_ne!(first, second);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
@@ -852,19 +877,13 @@ async fn cache_hits_notify_accounting_once_and_propagate_its_failure(
             .unwrap()
         )
     } else {
-        unary_call(
-            &cache,
-            Some(CacheOptions::new(CacheScope::Shared)),
-            &provider_calls,
-            request.clone(),
-        )
-        .await
+        unary_call(&cache, Some(shared()), &provider_calls, request.clone()).await
     };
     let result = if streaming_route {
         match execute_streaming::<TestRoute, _, _>(
             cache_request(request),
             Some(cache),
-            Some(CacheOptions::new(CacheScope::Shared)),
+            Some(shared()),
             &accounting,
             Some(&observer),
             || async { panic!("a cache hit must not call the provider") },
@@ -878,7 +897,7 @@ async fn cache_hits_notify_accounting_once_and_propagate_its_failure(
         execute_unary::<UnaryTestRoute, _, _>(
             cache_request(request),
             Some(cache),
-            Some(CacheOptions::new(CacheScope::Shared)),
+            Some(shared()),
             &accounting,
             Some(&observer),
             || async { panic!("a cache hit must not call the provider") },
@@ -936,10 +955,10 @@ async fn unary_call(
 }
 
 #[rstest]
-#[case::normal(CacheOptions::new(CacheScope::Shared), true, true)]
-#[case::no_cache(CacheOptions { policy: CachePolicy { no_cache: true, ..CachePolicy::default() }, ..CacheOptions::new(CacheScope::Shared) }, false, true)]
-#[case::no_store(CacheOptions { policy: CachePolicy { no_store: true, ..CachePolicy::default() }, ..CacheOptions::new(CacheScope::Shared) }, true, false)]
-#[case::disabled(CacheOptions { policy: CachePolicy { caching: Some(false), ..CachePolicy::default() }, ..CacheOptions::new(CacheScope::Shared) }, false, false)]
+#[case::normal(shared(), true, true)]
+#[case::no_cache(CacheOptions { policy: CachePolicy { no_cache: true, ..CachePolicy::default() }, ..shared() }, false, true)]
+#[case::no_store(CacheOptions { policy: CachePolicy { no_store: true, ..CachePolicy::default() }, ..shared() }, true, false)]
+#[case::disabled(CacheOptions { policy: CachePolicy { caching: Some(false), ..CachePolicy::default() }, ..shared() }, false, false)]
 #[tokio::test]
 async fn unary_cache_controls_do_not_change_the_shared_service(
     cache: Arc<dyn ResponseCacheService>,
@@ -950,23 +969,11 @@ async fn unary_cache_controls_do_not_change_the_shared_service(
     let calls = AtomicUsize::new(0);
     let options = Some(options);
     let first = unary_call(&cache, options.clone(), &calls, json!({"input":"hello"})).await;
-    let second = unary_call(
-        &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        json!({"input":"hello"}),
-    )
-    .await;
+    let second = unary_call(&cache, Some(shared()), &calls, json!({"input":"hello"})).await;
     assert_eq!(first == second, writes);
     let third = unary_call(&cache, options, &calls, json!({"input":"hello"})).await;
     assert_eq!(second == third, reads);
-    let fourth = unary_call(
-        &cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
-        &calls,
-        json!({"input":"hello"}),
-    )
-    .await;
+    let fourth = unary_call(&cache, Some(shared()), &calls, json!({"input":"hello"})).await;
     assert_eq!(fourth, if !reads && writes { third } else { second });
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -995,21 +1002,21 @@ async fn namespaces_and_surfaces_isolate_entries_on_shared_storage() {
     let calls = AtomicUsize::new(0);
     let first = call(
         &first_cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
+        Some(shared()),
         &calls,
         json!({"input":"hello"}),
     )
     .await;
     let different_namespace = call(
         &second_cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
+        Some(shared()),
         &calls,
         json!({"input":"hello"}),
     )
     .await;
     let different_surface = unary_call(
         &first_cache,
-        Some(CacheOptions::new(CacheScope::Shared)),
+        Some(shared()),
         &calls,
         json!({"input":"hello"}),
     )
@@ -1019,7 +1026,7 @@ async fn namespaces_and_surfaces_isolate_entries_on_shared_storage() {
     assert_eq!(
         call(
             &first_cache,
-            Some(CacheOptions::new(CacheScope::Shared)),
+            Some(shared()),
             &calls,
             json!({"input":"hello"})
         )
@@ -1029,7 +1036,7 @@ async fn namespaces_and_surfaces_isolate_entries_on_shared_storage() {
     assert_eq!(
         call(
             &second_cache,
-            Some(CacheOptions::new(CacheScope::Shared)),
+            Some(shared()),
             &calls,
             json!({"input":"hello"})
         )
@@ -1039,7 +1046,7 @@ async fn namespaces_and_surfaces_isolate_entries_on_shared_storage() {
     assert_eq!(
         unary_call(
             &first_cache,
-            Some(CacheOptions::new(CacheScope::Shared)),
+            Some(shared()),
             &calls,
             json!({"input":"hello"})
         )
@@ -1066,7 +1073,7 @@ async fn responses_cache_only_reuses_completed_responses(
         let response = execute_unary::<Responses, _, _>(
             cache_request(json!({"input":"hello"})),
             Some(cache.clone()),
-            Some(CacheOptions::new(CacheScope::Shared)),
+            Some(shared()),
             &(),
             None,
             || async {
@@ -1098,7 +1105,6 @@ async fn the_same_route_entrypoint_reports_facts_with_or_without_caching(
     #[case] caching: bool,
     traces: support::TraceCapture,
 ) {
-    use litellm_cache_response::ScopedCache;
     use litellm_core::chat_completions::types::ChatCompletionsRequest;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -1113,7 +1119,7 @@ async fn the_same_route_entrypoint_reports_facts_with_or_without_caching(
         .await;
     let route = support::chat_completions_route();
     let route = if caching {
-        route.with_cache(ScopedCache::new(cache, CacheScope::Shared).unwrap())
+        route.with_cache(cache)
     } else {
         route
     };
@@ -1134,7 +1140,11 @@ async fn the_same_route_entrypoint_reports_facts_with_or_without_caching(
                     timeout: None,
                 },
                 &(),
-                Some(observer.clone()),
+                litellm_core::CallOptions {
+                    cache: caching.then(shared),
+                    observers: Some(observer.clone()),
+                    ..Default::default()
+                },
             ))
             .await
             .unwrap();
@@ -1265,7 +1275,6 @@ async fn cache_identity_ignores_deployment_settings_and_skips_rewritten_requests
     #[case] surface: &str,
     #[case] change: &str,
 ) {
-    use litellm_cache_response::ScopedCache;
     use litellm_core::{
         chat_completions::{ChatCompletionsRoute, types::ChatCompletionsRequest},
         messages::MessagesCall,
@@ -1314,7 +1323,7 @@ async fn cache_identity_ignores_deployment_settings_and_skips_rewritten_requests
         secrets
             .revision
             .store(usize::from(call >= 2), Ordering::SeqCst);
-        let cache = ScopedCache::new(cache.clone(), CacheScope::Shared).unwrap();
+        let cache = cache.clone();
         let model = "cache-test-model";
         match surface {
             "chat" => {
@@ -1336,7 +1345,7 @@ async fn cache_identity_ignores_deployment_settings_and_skips_rewritten_requests
                         timeout: None,
                     },
                     &hooks,
-                    None,
+                    shared(),
                 )
                 .await
                 .unwrap();
@@ -1345,7 +1354,7 @@ async fn cache_identity_ignores_deployment_settings_and_skips_rewritten_requests
                 support::messages_route(secrets.clone()).with_cache(cache).execute(MessagesCall {
                     body: serde_json::from_value(json!({"model":format!("anthropic/{model}"),"messages":[{"role":"user","content":"hello"}],"max_tokens":32})).unwrap(),
                     api_key:None,api_base:None,custom_llm_provider:None,extra_headers:None,provider_specific_header:None,timeout:None,shaping:Default::default(),
-                }, &hooks, None).await.unwrap();
+                }, &hooks, shared()).await.unwrap();
             }
             "responses" => {
                 support::responses_route(secrets.clone())
@@ -1362,7 +1371,7 @@ async fn cache_identity_ignores_deployment_settings_and_skips_rewritten_requests
                             timeout: None,
                         },
                         &hooks,
-                        None,
+                        shared(),
                     )
                     .await
                     .unwrap();
@@ -1422,7 +1431,6 @@ async fn the_model_group_decides_cache_reuse(
     #[case] model_group: &str,
     #[case] hit: bool,
 ) {
-    use litellm_cache_response::ScopedCache;
     use litellm_core::{CallOptions, chat_completions::types::ChatCompletionsRequest};
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -1436,8 +1444,7 @@ async fn the_model_group_decides_cache_reuse(
         .expect(if hit { 1 } else { 2 })
         .mount(&upstream)
         .await;
-    let route = support::chat_completions_route()
-        .with_cache(ScopedCache::new(cache, CacheScope::Shared).unwrap());
+    let route = support::chat_completions_route().with_cache(cache);
     let hooks = ChangingHooks::default();
     for (model, model_group) in [("anthropic/claude-a", "group-a"), (model, model_group)] {
         route
@@ -1454,7 +1461,7 @@ async fn the_model_group_decides_cache_reuse(
                 },
                 &hooks,
                 CallOptions {
-                    cache: Some(CachePolicy::default()),
+                    cache: Some(shared()),
                     model_group: Some(model_group.into()),
                     observers: None,
                 },
@@ -1475,7 +1482,6 @@ async fn the_model_group_decides_cache_reuse(
 #[rstest]
 #[tokio::test]
 async fn signed_requests_bypass_response_caching(cache: Arc<dyn ResponseCacheService>) {
-    use litellm_cache_response::ScopedCache;
     use litellm_core::chat_completions::types::ChatCompletionsRequest;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -1488,8 +1494,7 @@ async fn signed_requests_bypass_response_caching(cache: Arc<dyn ResponseCacheSer
         .expect(2)
         .mount(&upstream)
         .await;
-    let route = support::chat_completions_route()
-        .with_cache(ScopedCache::new(cache, CacheScope::Shared).unwrap());
+    let route = support::chat_completions_route().with_cache(cache);
     let hooks = ChangingHooks::default();
     for _ in 0..2 {
         let response = route.execute(ChatCompletionsRequest {
@@ -1497,7 +1502,7 @@ async fn signed_requests_bypass_response_caching(cache: Arc<dyn ResponseCacheSer
             messages:json!([{"role":"user","content":"hello"}]),
             optional_params:json!({"aws_access_key_id":"test-access","aws_secret_access_key":"test-secret","aws_region_name":"eu-west-1"}).as_object().unwrap().clone(),
             api_key:None,api_base:Some(&upstream.uri()),custom_llm_provider:None,extra_headers:None,timeout:None,
-        }, &hooks, None).await.unwrap();
+        }, &hooks, shared()).await.unwrap();
         assert_eq!(
             serde_json::to_value(response).unwrap()["usage"]["total_tokens"],
             5
@@ -1525,7 +1530,6 @@ async fn forwarded_headers_and_the_deployment_decide_messages_cache_reuse(
     #[case] change: &str,
     #[case] hit: bool,
 ) {
-    use litellm_cache_response::ScopedCache;
     use litellm_core::messages::MessagesCall;
     use litellm_llms_types::headers::{ProviderSpecificHeader, ProviderSpecificHeaders};
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -1540,8 +1544,7 @@ async fn forwarded_headers_and_the_deployment_decide_messages_cache_reuse(
         .expect(if hit { 1 } else { 2 })
         .mount(&upstream)
         .await;
-    let route = support::messages_route(support::no_secrets())
-        .with_cache(ScopedCache::new(cache, CacheScope::Shared).unwrap());
+    let route = support::messages_route(support::no_secrets()).with_cache(cache);
     let hooks = ChangingHooks::default();
     let call = |change: &str| MessagesCall {
         body: serde_json::from_value(json!({
@@ -1575,7 +1578,7 @@ async fn forwarded_headers_and_the_deployment_decide_messages_cache_reuse(
         shaping: Default::default(),
     };
     for change in ["none", change] {
-        route.execute(call(change), &hooks, None).await.unwrap();
+        route.execute(call(change), &hooks, shared()).await.unwrap();
     }
     assert_eq!(
         matches!(

@@ -9,7 +9,7 @@ use litellm_auth::AuthServices;
 use litellm_host::interceptors::{ExecutionFacts, Interceptors, ResultSource};
 
 use crate::{
-    caching::{CallCache, RouteCache},
+    caching::{CachePlan, CacheSession},
     context::CallContext,
 };
 use litellm_secrets::source::SecretSource;
@@ -23,7 +23,7 @@ pub struct MessagesRoute {
     http: litellm_http::Client,
     auth: Arc<AuthServices>,
     secrets: Arc<dyn SecretSource>,
-    cache: Option<litellm_cache_response::ScopedCache>,
+    cache: Option<Arc<dyn litellm_cache_response::ResponseCacheService>>,
 }
 
 impl MessagesRoute {
@@ -41,7 +41,10 @@ impl MessagesRoute {
     }
 
     #[must_use]
-    pub fn with_cache(self, cache: impl Into<Option<litellm_cache_response::ScopedCache>>) -> Self {
+    pub fn with_cache(
+        self,
+        cache: impl Into<Option<Arc<dyn litellm_cache_response::ResponseCacheService>>>,
+    ) -> Self {
         Self {
             cache: cache.into(),
             ..self
@@ -73,9 +76,9 @@ impl MessagesRoute {
         context: CallContext<'_, impl Interceptors<Error>>,
     ) -> Result<MessagesCallResponse, Error> {
         crate::diagnostic::call(async {
-            let cache = RouteCache::attach(
+            let cache = CachePlan::for_request(
                 self.cache.as_ref(),
-                Some(context.cache),
+                context.cache.clone(),
                 &call,
                 context.model_group.as_deref(),
             )?;
@@ -85,9 +88,9 @@ impl MessagesRoute {
                 .prepare_outbound(prepared, cache, &context)
                 .boxed()
                 .await?;
-            let cache = CallCache::<route::Messages>::prepare(request.cache.take()).await;
+            let session = CacheSession::<route::Messages>::open(request.cache.take()).await;
             let identity = request.identity.clone();
-            let (output, source) = match cache.lookup().await {
+            let (output, source) = match CacheSession::replay(session.as_ref()).await {
                 Some(hit) => hit,
                 None => (
                     self.call_provider(request, &context).await?,
@@ -100,7 +103,7 @@ impl MessagesRoute {
                     source: source.clone(),
                 })
                 .await?;
-            Ok(cache.finish(output, &source).await)
+            Ok(CacheSession::finish(session, output, &source).await)
         })
         .await
     }
