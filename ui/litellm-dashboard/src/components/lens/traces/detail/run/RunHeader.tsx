@@ -9,6 +9,7 @@ import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/cva.config";
 import { copyToClipboard } from "@/utils/dataUtils";
 
+import { AddToDatasetButton } from "../../../datasets/AddToDatasetDialog";
 import type { TraceHandoff } from "../../api";
 import { traceRefOf, traceShareUrl } from "../../routing";
 import { formatCost } from "../../list/AgentTracesTable";
@@ -112,6 +113,10 @@ export function RunHeader({ trace, handoff, onBack, embedded }: RunHeaderProps) 
             </TabsTrigger>
           </TabsList>
           <div className="flex items-center gap-1.5">
+            <AddToDatasetButton
+              sources={[{ kind: "trace", trace_id: summary.trace_id, trace_ref: summary.trace_ref ?? "", span_id: "" }]}
+              agentName={traceAgentNames(summary)[0]}
+            />
             <CopyButton
               label="Copy link"
               icon={Link}
