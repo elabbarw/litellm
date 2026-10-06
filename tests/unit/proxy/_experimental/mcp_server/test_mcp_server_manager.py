@@ -2103,6 +2103,53 @@ class TestMCPServerManager:
 
         assert captured_extra_headers == {"x-trace-id": "trace-token"}
 
+    @pytest.mark.asyncio
+    async def test_call_regular_mcp_tool_filters_approval_reference_from_hook_headers(self):
+        manager: Final = MCPServerManager()
+        server: Final = MCPServer(
+            server_id="server-hook-approval-call",
+            name="hook-approval-call-server",
+            url="https://example.com",
+            transport=MCPTransport.http,
+        )
+        mock_client: Final = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value=CallToolResult(content=[], isError=False))
+        class HeaderCapture:
+            def __init__(self) -> None:
+                self.extra_headers: dict[str, str] | None = None
+
+        header_capture: Final = HeaderCapture()
+
+        async def capture_create_mcp_client(
+            server: MCPServer,
+            mcp_auth_header: str | dict[str, str] | None = None,
+            extra_headers: dict[str, str] | None = None,
+            stdio_env: dict[str, str] | None = None,
+            **kwargs: object,
+        ) -> AsyncMock:
+            header_capture.extra_headers = extra_headers
+            return mock_client
+
+        with patch.object(manager, "_create_mcp_client", AsyncMock(side_effect=capture_create_mcp_client)):
+            result: Final = await manager._call_regular_mcp_tool(
+                mcp_server=server,
+                original_tool_name="tool",
+                arguments={},
+                tasks=[],
+                mcp_auth_header=None,
+                mcp_server_auth_headers=None,
+                oauth2_headers=None,
+                raw_headers=None,
+                proxy_logging_obj=None,
+                hook_extra_headers={
+                    "X-LiteLLM-MCP-Approval-Reference": "signed-approval-token",
+                    "x-trace-id": "trace-token",
+                },
+            )
+
+        assert isinstance(result, CallToolResult)
+        assert header_capture.extra_headers == {"x-trace-id": "trace-token"}
+
     async def _capture_list_subject_token(self, server, oauth2_headers, raw_headers=None):
         """Run _get_tools_from_server and return the subject_token it threaded to _create_mcp_client."""
         manager = MCPServerManager()
@@ -17459,8 +17506,14 @@ async def test_approval_reference_does_not_cross_servers_sharing_a_name():
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     jwks_url = "https://approvals.example.com/.well-known/jwks.json"
-    jwks_doc = _json.loads(pyjwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
-    jwks_doc.update({"kid": "kid-1", "use": "sig", "alg": "RS256"})
+    jwks_doc: Final = {
+        **TypeAdapter(dict[str, object]).validate_python(
+            _json.loads(pyjwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
+        ),
+        "kid": "kid-1",
+        "use": "sig",
+        "alg": "RS256",
+    }
     await _jwks_cache.async_set_cache(jwks_url, (jwks_doc,))
     try:
         policy = MCPApprovalPolicy(
@@ -17512,5 +17565,78 @@ async def test_approval_reference_does_not_cross_servers_sharing_a_name():
             await manager.pre_call_tool_check(server=server_b, **call)
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail["error"] == "mcp_approval_reference_invalid"
+    finally:
+        _jwks_cache.flush_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_reference", [False, True])
+async def test_prefixed_high_risk_tool_requires_and_accepts_approval_reference(include_reference: bool):
+    import json as _json
+    import time
+
+    import jwt as pyjwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from litellm.constants import MCP_APPROVAL_REFERENCE_HEADER
+    from litellm.proxy._experimental.mcp_server.approval_reference import _jwks_cache
+    from litellm.proxy._experimental.mcp_server.utils import MCP_TOOL_PREFIX_SEPARATOR, get_server_prefix
+    from litellm.types.mcp_server.mcp_server_manager import MCPApprovalPolicy
+
+    key: Final = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwks_url: Final = "https://approvals.example.com/.well-known/prefixed-jwks.json"
+    jwks_doc: Final = {
+        **TypeAdapter(dict[str, object]).validate_python(
+            _json.loads(pyjwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
+        ),
+        "kid": "kid-prefixed",
+        "use": "sig",
+        "alg": "RS256",
+    }
+    await _jwks_cache.async_set_cache(jwks_url, (jwks_doc,))
+    try:
+        policy: Final = MCPApprovalPolicy(
+            tools=("delete_records",),
+            issuer="https://approvals.example.com",
+            jwks_url=jwks_url,
+        )
+        manager: Final = MCPServerManager()
+        server: Final = MCPServer(
+            server_id="srv-prefixed-approval",
+            name="prefixed-approval-server",
+            url="https://example.com/mcp",
+            transport=MCPTransport.http,
+            approval_policy=policy,
+        )
+        prefixed_name: Final = f"{get_server_prefix(server)}{MCP_TOOL_PREFIX_SEPARATOR}delete_records"
+        reference: Final = pyjwt.encode(
+            {
+                "iss": "https://approvals.example.com",
+                "exp": int(time.time()) + 600,
+                "jti": "jti-prefixed",
+                "mcp_server": server.server_id,
+                "mcp_tool": "delete_records",
+            },
+            key,
+            algorithm="RS256",
+            headers={"kid": "kid-prefixed"},
+        )
+        check: Final = manager.pre_call_tool_check(
+            name=prefixed_name,
+            arguments={},
+            server_name=server.name,
+            user_api_key_auth=None,
+            proxy_logging_obj=None,
+            server=server,
+            raw_headers={MCP_APPROVAL_REFERENCE_HEADER: reference} if include_reference else {},
+        )
+
+        if include_reference:
+            await check
+        else:
+            with pytest.raises(HTTPException) as exc_info:
+                await check
+            assert exc_info.value.status_code == 403
+            assert exc_info.value.detail["error"] == "mcp_approval_reference_required"
     finally:
         _jwks_cache.flush_cache()

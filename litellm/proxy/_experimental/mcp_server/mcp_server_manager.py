@@ -5742,7 +5742,9 @@ class MCPServerManager:
         policy: Final = server.approval_policy
         if policy is None:
             return
-        policy_tool: Final = match_known_tool_name(name, server, policy.tools)
+        policy_tool: Final = match_known_tool_name(name, server, policy.tools) or match_known_tool_name(
+            strip_known_server_prefix(name, server), server, policy.tools
+        )
         if policy_tool is None:
             return
         result: Final = await verify_approval_reference(
@@ -6168,10 +6170,13 @@ class MCPServerManager:
                 extra_headers = {}
             extra_headers.update(resolved_static_headers)
 
-        if hook_extra_headers:
+        forwardable_hook_headers: Final = {
+            k: v for k, v in (hook_extra_headers or {}).items() if is_forwardable_caller_header(k)
+        }
+        if forwardable_hook_headers:
             if extra_headers is None:
                 extra_headers = {}
-            hook_has_authorization: Final = any(k.lower() == "authorization" for k in hook_extra_headers)
+            hook_has_authorization: Final = any(k.lower() == "authorization" for k in forwardable_hook_headers)
             existing_has_authorization: Final = any(k.lower() == "authorization" for k in extra_headers)
             server_auth_occupies_authorization: Final = (
                 any(k.lower() == "authorization" for k in server_auth_header)
@@ -6188,9 +6193,11 @@ class MCPServerManager:
                     "Authorization slot; the existing credential is kept.",
                     mcp_server.server_name or mcp_server.name,
                 )
-                extra_headers.update({k: v for k, v in hook_extra_headers.items() if k.lower() != "authorization"})
+                extra_headers.update(
+                    {k: v for k, v in forwardable_hook_headers.items() if k.lower() != "authorization"}
+                )
             else:
-                extra_headers.update(hook_extra_headers)
+                extra_headers.update(forwardable_hook_headers)
 
         # Reset to None if no headers were actually added
         if extra_headers is not None and len(extra_headers) == 0:

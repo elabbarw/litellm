@@ -1,11 +1,14 @@
+import functools
 import json
 import logging
 import time
+from collections.abc import Mapping
+from typing import Final
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from litellm._logging import verbose_logger
 from litellm.constants import MCP_APPROVAL_REFERENCE_HEADER
@@ -25,31 +28,43 @@ AUDIENCE = "mcp-gateway"
 SERVER_ID = "srv-123"
 TOOL = "delete_records"
 
-_now = int(time.time())
-
-_signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-_other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_now: Final = int(time.time())
 
 
-def _jwks_for(*key_kid_pairs: tuple[rsa.RSAPrivateKey, str]) -> list[dict[str, object]]:
-    entries: list[dict[str, object]] = []
-    for key, kid in key_kid_pairs:
-        doc: dict[str, object] = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
-        doc["kid"] = kid
-        doc["use"] = "sig"
-        doc["alg"] = "RS256"
-        entries.append(doc)
-    return entries
+@functools.cache
+def _approval_signing_material() -> tuple[
+    rsa.RSAPrivateKey,
+    rsa.RSAPrivateKey,
+    tuple[Mapping[str, object], ...],
+]:
+    signing_key: Final = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    other_key: Final = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwks: Final = (
+        {
+            **TypeAdapter(dict[str, object]).validate_python(
+                json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(signing_key.public_key()))
+            ),
+            "kid": "kid-1",
+            "use": "sig",
+            "alg": "RS256",
+        },
+        {
+            **TypeAdapter(dict[str, object]).validate_python(
+                json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(other_key.public_key()))
+            ),
+            "kid": "kid-2",
+            "use": "sig",
+            "alg": "RS256",
+        },
+    )
+    return signing_key, other_key, jwks
 
 
-JWKS = _jwks_for((_signing_key, "kid-1"), (_other_key, "kid-2"))
+async def _fetch_jwks(_url: str) -> tuple[Mapping[str, object], ...]:
+    return _approval_signing_material()[2]
 
 
-async def _fetch_jwks(_url: str) -> list[dict[str, object]]:
-    return JWKS
-
-
-async def _failing_fetch(_url: str) -> list[dict[str, object]]:
+async def _failing_fetch(_url: str) -> tuple[Mapping[str, object], ...]:
     raise ConnectionError("jwks endpoint unreachable")
 
 
@@ -63,12 +78,13 @@ def _policy(*, audience: str | None = AUDIENCE) -> MCPApprovalPolicy:
 
 
 def _token(
-    key: rsa.RSAPrivateKey | bytes | None = _signing_key,
+    key: rsa.RSAPrivateKey | bytes | None = None,
     kid: str = "kid-1",
     alg: str = "RS256",
     **claims: object,
 ) -> str:
-    payload = {
+    signing_key: Final = _approval_signing_material()[0]
+    payload: Final = {
         "iss": ISSUER,
         "exp": _now + 600,
         "jti": "jti-1",
@@ -76,9 +92,9 @@ def _token(
         "mcp_tool": TOOL,
         "aud": AUDIENCE,
         "sub": "agent-7",
+        **claims,
     }
-    payload.update(claims)
-    return jwt.encode(payload, key, algorithm=alg, headers={"kid": kid})
+    return jwt.encode(payload, signing_key if key is None else key, algorithm=alg, headers={"kid": kid})
 
 
 def _headers(token: str | None) -> dict[str, str]:
@@ -154,7 +170,9 @@ async def test_audience_absent_or_any_accepted_when_policy_audience_none():
     no_aud_token = _token()
     claims = jwt.decode(no_aud_token, options={"verify_signature": False})
     claims.pop("aud")
-    token_without_aud = jwt.encode(claims, _signing_key, algorithm="RS256", headers={"kid": "kid-1"})
+    token_without_aud = jwt.encode(
+        claims, _approval_signing_material()[0], algorithm="RS256", headers={"kid": "kid-1"}
+    )
     result = await _call(_policy(audience=None), token=token_without_aud)
     assert isinstance(result, ApprovalVerified)
 
@@ -217,7 +235,7 @@ async def test_hs256_is_rejected():
 async def test_missing_jti_is_invalid():
     claims = jwt.decode(_token(), options={"verify_signature": False})
     claims.pop("jti")
-    token = jwt.encode(claims, _signing_key, algorithm="RS256", headers={"kid": "kid-1"})
+    token = jwt.encode(claims, _approval_signing_material()[0], algorithm="RS256", headers={"kid": "kid-1"})
     result = await _call(_policy(), token=token)
     assert isinstance(result, ApprovalRejected)
     assert result.reason == "invalid"
