@@ -12,8 +12,8 @@ use litellm_auth::AuthServices;
 use litellm_llms_types::formats::chat_completions::ChatCompletionsResponse;
 use litellm_secrets::source::SecretSource;
 
-use crate::caching::CacheKeyProjection;
-use crate::chat_completions::types::ChatCompletionsRequest;
+use crate::caching::RouteCache;
+use crate::chat_completions::types::{ChatCompletionsCall, ChatCompletionsRequest};
 use prepare::{prepare_provider_request, resolve_request};
 
 #[derive(Clone)]
@@ -38,16 +38,16 @@ impl ChatCompletionsRoute {
         }
     }
 
-    pub fn with_cache(self, cache: litellm_cache_response::ScopedCache) -> Self {
+    pub fn with_cache(self, cache: impl Into<Option<litellm_cache_response::ScopedCache>>) -> Self {
         Self {
-            cache: Some(cache),
+            cache: cache.into(),
             ..self
         }
     }
 
     pub async fn execute(
         &self,
-        request: ChatCompletionsRequest<'_>,
+        request: impl Into<ChatCompletionsCall>,
         interceptors: &impl litellm_host::interceptors::Interceptors<Error>,
         options: impl Into<crate::CallOptions>,
     ) -> Result<ChatCompletionsResponse, Error> {
@@ -77,11 +77,7 @@ impl ChatCompletionsRoute {
         interceptors: &impl litellm_host::interceptors::Interceptors<Error>,
         observers: Option<&ObservationSender>,
     ) -> Result<ChatCompletionsResponse, Error> {
-        let cache_input = self
-            .cache
-            .as_ref()
-            .map(|_| request.cache_key_input(model_group))
-            .transpose()?;
+        let cache = RouteCache::attach(self.cache.as_ref(), cache_options, &request, model_group)?;
         let resolved = resolve_request(request)?;
         let snapshot = self
             .secrets
@@ -93,9 +89,8 @@ impl ChatCompletionsRoute {
             Box::pin(handler::execute(
                 &self.http,
                 &self.auth,
-                (prepared, cache_input),
-                self.cache.clone(),
-                cache_options,
+                prepared,
+                cache,
                 interceptors,
                 observers,
             ));

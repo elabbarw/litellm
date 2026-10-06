@@ -8,11 +8,13 @@ use futures_util::FutureExt;
 use litellm_auth::AuthServices;
 use litellm_host::interceptors::{ExecutionFacts, Interceptors, ResultSource};
 
-use crate::{caching::CallCache, context::CallContext};
+use crate::{
+    caching::{CallCache, RouteCache},
+    context::CallContext,
+};
 use litellm_secrets::source::SecretSource;
 use std::sync::Arc;
 
-use crate::caching::CacheKeyProjection;
 pub use crate::error::RouteError as Error;
 pub use types::{MessagesCall, MessagesCallResponse, MessagesShaping, messages_body};
 
@@ -39,9 +41,9 @@ impl MessagesRoute {
     }
 
     #[must_use]
-    pub fn with_cache(self, cache: litellm_cache_response::ScopedCache) -> Self {
+    pub fn with_cache(self, cache: impl Into<Option<litellm_cache_response::ScopedCache>>) -> Self {
         Self {
-            cache: Some(cache),
+            cache: cache.into(),
             ..self
         }
     }
@@ -71,26 +73,19 @@ impl MessagesRoute {
         context: CallContext<'_, impl Interceptors<Error>>,
     ) -> Result<MessagesCallResponse, Error> {
         crate::diagnostic::call(async {
-            let cache_input = self
-                .cache
-                .as_ref()
-                .map(|_| call.cache_key_input(context.model_group.as_deref()))
-                .transpose()?;
+            let cache = RouteCache::attach(
+                self.cache.as_ref(),
+                Some(context.cache),
+                &call,
+                context.model_group.as_deref(),
+            )?;
             let prepared = prepare::prepare(call, self.secrets.as_ref()).await?;
             crate::diagnostic::provider(&prepared.body.model, prepared.provider.as_str());
-            let request = self.prepare_outbound(prepared, &context).boxed().await?;
-            let cache = CallCache::<route::Messages>::prepare(
-                self.cache.as_ref().filter(|_| request.cacheable()),
-                context.cache,
-                crate::caching::CacheRequest::from_logical(
-                    request.identity.clone(),
-                    cache_input,
-                    request.original.as_ref(),
-                    &request.wire,
-                )
-                .input,
-            )
-            .await;
+            let mut request = self
+                .prepare_outbound(prepared, cache, &context)
+                .boxed()
+                .await?;
+            let cache = CallCache::<route::Messages>::prepare(request.cache.take()).await;
             let identity = request.identity.clone();
             let (output, source) = match cache.lookup().await {
                 Some(hit) => hit,
